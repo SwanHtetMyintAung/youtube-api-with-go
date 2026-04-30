@@ -1,0 +1,163 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+)
+
+type GoogleClient struct {
+	Installed struct {
+		ClientID     string   `json:"client_id"`
+		RedirectURIs []string `json:"redirect_uris"`
+		Scopes       []string `json:"scopes"`
+		ResponseType string
+		AccessType   string
+		ClientSecret string `json:"client_secret"`
+	} `json:"installed"`
+}
+type OAuthToken struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+const BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth" //nlm go, fuck you. i'll use JS conventions here
+const OAUTH2_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+func main() {
+	//check if the tokens already exists
+	var token OAuthToken
+	_, err := LoadTokenFromFile("token.json", &token)
+	if err != nil {
+		println("Could not load token.json and proceeding to normal procedures.")
+		err = CreateTokenFromConsentScreen("token.json", "client.json", &token)
+		if err != nil {
+			println(err.Error())
+			os.Exit(1)
+		}
+	}
+	var playlistId string
+	println("PlaylistId: ")
+	fmt.Scan(&playlistId)
+
+	urlToPlaylist := "https://www.googleapis.com/youtube/v3/playlistItems" + "?part=snippet" + "&playlistId=" + playlistId + "&maxResults=30"
+
+	resBody, err := GetPlaylistItems(urlToPlaylist, token.AccessToken)
+
+	if err != nil {
+		println("Could not get playlist items.")
+		os.Exit(1)
+	}
+	os.WriteFile("playlistItems.json", resBody, 0644)
+	os.Exit(0)
+
+}
+func CreateTokenFromConsentScreen(tokenFilePath string, clientFilePath string, token *OAuthToken) error {
+	var client GoogleClient
+	url, err := MakeConsentScreenUrl(clientFilePath, &client)
+	if err != nil {
+		return err
+	}
+	println(url)
+
+	var code string
+	print("Please enter a code here: ")
+	fmt.Scan(&code)
+
+	data, err := GetTokensFromCode(client, code)
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(data, &token)
+	if err != nil {
+		return err
+	}
+	err = os.WriteFile(tokenFilePath, data, 0644)
+	if err != nil {
+		fmt.Println("Could not write token.json")
+	}
+	return nil
+}
+
+func GetPlaylistItems(url string, token string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return []byte(""), err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return []byte(""), err
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return []byte(""), err
+	}
+	return data, nil
+}
+
+// LoadTokenFromFile : true if the file is found and tokens are there
+func LoadTokenFromFile(filepath string, token *OAuthToken) (bool, error) {
+	tokenBytes, err := os.ReadFile(filepath)
+	if err != nil {
+		return false, err
+	}
+
+	err = json.Unmarshal(tokenBytes, &token)
+	if err != nil {
+		return false, err
+	}
+	if token.RefreshToken != "" && token.AccessToken != "" {
+		return true, nil
+	}
+	return false, errors.New("invalid token")
+}
+
+func MakeConsentScreenUrl(filepath string, client *GoogleClient) (string, error) {
+	credByte, err := os.ReadFile(filepath)
+
+	if err != nil {
+		return "", err
+	}
+	jsonErr := json.Unmarshal(credByte, &client)
+
+	if jsonErr != nil {
+		return "", jsonErr
+	}
+	//this part is kinda clunky
+	client.Installed.ResponseType = "code"
+	client.Installed.Scopes = []string{"https://www.googleapis.com/auth/youtube"}
+	client.Installed.AccessType = "offline"
+
+	urlTOReturn := BASE_URL + "?client_id=" + client.Installed.ClientID + "&redirect_uri=" + client.Installed.RedirectURIs[0] + "&" + client.Installed.ResponseType + "&scope=" + client.Installed.Scopes[0] + "&access_type=" + client.Installed.AccessType + "&response_type=" + client.Installed.ResponseType
+	return urlTOReturn, nil
+}
+
+// GetTokensFromCode : will return the "body" of the http response from Google
+func GetTokensFromCode(client GoogleClient, code string) ([]byte, error) {
+	tokenJson := map[string]string{
+		"code":          code,
+		"client_id":     client.Installed.ClientID,
+		"client_secret": client.Installed.ClientSecret,
+		"redirect_uri":  client.Installed.RedirectURIs[0],
+		"grant_type":    "authorization_code",
+	}
+	tokenByte, err := json.Marshal(tokenJson)
+	if err != nil {
+		return []byte(""), err
+	}
+	resp, err := http.Post(OAUTH2_TOKEN_URL, "application/json", bytes.NewBuffer(tokenByte))
+	if err != nil {
+		return []byte(""), err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return data, nil
+}
