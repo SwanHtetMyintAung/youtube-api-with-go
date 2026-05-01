@@ -31,15 +31,38 @@ const OAUTH2_TOKEN_URL = "https://oauth2.googleapis.com/token"
 func main() {
 	//check if the tokens already exists
 	var token OAuthToken
+	var client GoogleClient
 	_, err := LoadTokenFromFile("token.json", &token)
+
 	if err != nil {
 		println("Could not load token.json and proceeding to normal procedures.")
-		err = CreateTokenFromConsentScreen("token.json", "client.json", &token)
+		err = CreateTokenFromConsentScreen("token.json", "client.json", &token, &client)
 		if err != nil {
 			println(err.Error())
 			os.Exit(1)
 		}
 	}
+	valid, err := CheckValidityOfToken(token)
+	if valid == false {
+		println("the token isn't valid, refreshing the token.")
+		//refresh the token here
+		err = RefreshAccessToken(&token, client)
+		if err != nil {
+			println(err.Error())
+		} else {
+			//if the program wasn't able to refresh the token, make the user sign in again
+			println("Could not load token.json and proceeding to normal procedures.")
+			err = CreateTokenFromConsentScreen("token.json", "client.json", &token, &client)
+			if err != nil {
+				println(err.Error())
+				os.Exit(1)
+			}
+		}
+
+	} else {
+		println("the token is valid")
+	}
+
 	var playlistId string
 	println("PlaylistId: ")
 	fmt.Scan(&playlistId)
@@ -53,12 +76,24 @@ func main() {
 		os.Exit(1)
 	}
 	os.WriteFile("playlistItems.json", resBody, 0644)
+	//use the resBody ([]byte) and cast it or use the data directly
+	var test map[string]interface{}
+	err = json.Unmarshal(resBody, &test)
+	videos := test["items"].([]interface{})
+	for _, video := range videos {
+		videoMap := video.(map[string]interface{})
+		playlist_id := videoMap["id"].(string)
+
+		err = DeletePlaylistItems(token.AccessToken, playlist_id)
+		if err != nil {
+			println(err.Error())
+		}
+	}
 	os.Exit(0)
 
 }
-func CreateTokenFromConsentScreen(tokenFilePath string, clientFilePath string, token *OAuthToken) error {
-	var client GoogleClient
-	url, err := MakeConsentScreenUrl(clientFilePath, &client)
+func CreateTokenFromConsentScreen(tokenFilePath string, clientFilePath string, token *OAuthToken, client *GoogleClient) error {
+	url, err := MakeConsentScreenUrl(clientFilePath, client)
 	if err != nil {
 		return err
 	}
@@ -68,7 +103,7 @@ func CreateTokenFromConsentScreen(tokenFilePath string, clientFilePath string, t
 	print("Please enter a code here: ")
 	fmt.Scan(&code)
 
-	data, err := GetTokensFromCode(client, code)
+	data, err := GetTokensFromCode(*client, code)
 	if err != nil {
 		return err
 	}
@@ -100,6 +135,7 @@ func GetPlaylistItems(url string, token string) ([]byte, error) {
 	if err != nil {
 		return []byte(""), err
 	}
+
 	return data, nil
 }
 
@@ -160,4 +196,51 @@ func GetTokensFromCode(client GoogleClient, code string) ([]byte, error) {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	return data, nil
+}
+
+func CheckValidityOfToken(token OAuthToken) (bool, error) {
+	resp, err := http.Get("https://oauth2.googleapis.com/tokeninfo?access_token=" + token.AccessToken)
+	if err != nil {
+		return false, err
+	}
+	return resp.StatusCode == 200, nil
+}
+func RefreshAccessToken(token *OAuthToken, client GoogleClient) error {
+	tokenJson := map[string]string{
+		"client_id":     client.Installed.ClientID,
+		"client_secret": client.Installed.ClientSecret,
+		"refresh_token": token.RefreshToken,
+		"grant_type":    "refresh_token",
+	}
+	//change the map into []bytes
+	tokenByte, err := json.Marshal(tokenJson)
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(OAUTH2_TOKEN_URL, "application/json", bytes.NewBuffer(tokenByte))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	json.Unmarshal(data, &token)
+	return nil
+}
+
+// DeletePlaylistItem : as the name suggest
+func DeletePlaylistItems(access_token string, playlist_id string) error { //not the video id
+	req, err := http.NewRequest("DELETE",
+		"https://www.googleapis.com/youtube/v3/playlistItems?id="+playlist_id,
+		nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+access_token)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
 }
